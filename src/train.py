@@ -57,7 +57,7 @@ def parse_args():
     )
     parser.add_argument(
         "--n_inner", type=int, default=None,
-        help="Feed-forward inner dimension (default: 4 * n_embd)"
+        help="Feed-forward inner dimension (default: 3 * n_embd)"
     )
     parser.add_argument(
         "--dropout", type=float, default=0.1,
