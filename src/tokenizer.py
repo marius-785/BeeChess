@@ -283,34 +283,39 @@ def count_vocab_from_dataset(
 
 class ChessTokenizer(FrequencyChessTokenizer):
     """
-    A compositional tokenizer for chess moves using piece + source + destination encoding.
+    A compositional tokenizer for chess moves using colored pieces + positional markers.
     
-    This tokenizer breaks each move into 3 core components:
-    1. Piece: P, N, B, R, Q, K (color determined by position in sequence)
-    2. Source square: a1, a2, ..., h8
-    3. Destination square: a1, a2, ..., h8
+    This tokenizer breaks each move into 5 core components with explicit structure:
+    1. ColoredPiece: WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
+    2. SOURCE marker: [SOURCE]
+    3. Source square: a1, a2, ..., h8
+    4. DEST marker: [DEST]
+    5. Destination square: a1, a2, ..., h8
     
     Optional modifier tokens for captures, checks, checkmate, and castling.
-    
-    Color is determined deterministically:
-    - Even position in move sequence (0, 2, 4, ...) = White
-    - Odd position in move sequence (1, 3, 5, ...) = Black
     
     Example:
         >>> tokenizer = ChessTokenizer()
         >>> tokenizer.encode("WPe2e4 BPe7e5")
-        [1, P_id, e2_id, e4_id, P_id, e7_id, e5_id, 2]  # [BOS, P, e2, e4, P, e7, e5, EOS]
+        [1, WP_id, SRC_id, e2_id, DST_id, e4_id, BP_id, SRC_id, e7_id, DST_id, e5_id, 2]
     
     Vocabulary:
-    - Pieces (6): P, N, B, R, Q, K
+    - Colored pieces (12): WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
+    - Position markers (2): [SOURCE], [DEST]
     - Squares (64): a1-h8
     - Modifiers (5): [CAPTURE], [CHECK], [CHECKMATE], [CASTLING_KS], [CASTLING_QS]
     - Special (4): [PAD], [BOS], [EOS], [UNK]
-    Total: ~80 tokens (deterministic, no frequency filtering)
+    Total: ~87 tokens (deterministic, no frequency filtering)
     """
     
-    # Piece tokens (no color prefix - color determined by position)
-    PIECES = ['P', 'N', 'B', 'R', 'Q', 'K']
+    # Colored piece tokens (color + piece)
+    COLORED_PIECES = [
+        'WP', 'WN', 'WB', 'WR', 'WQ', 'WK',  # White pieces
+        'BP', 'BN', 'BB', 'BR', 'BQ', 'BK',  # Black pieces
+    ]
+    
+    # Position markers
+    POSITION_MARKERS = ['[SOURCE]', '[DEST]']
     
     # Board squares (standard chess notation)
     SQUARES = [f"{file}{rank}" for rank in range(1, 9) for file in "abcdefgh"]
@@ -337,7 +342,7 @@ class ChessTokenizer(FrequencyChessTokenizer):
     
     def _build_deterministic_vocab(self) -> Dict[str, int]:
         """
-        Build vocabulary deterministically from pieces, squares, and modifiers.
+        Build vocabulary deterministically from colored pieces, squares, and modifiers.
         
         Returns:
             Dictionary mapping token strings to IDs.
@@ -351,9 +356,14 @@ class ChessTokenizer(FrequencyChessTokenizer):
             vocab[token] = idx
             idx += 1
         
-        # Piece tokens
-        for piece in self.PIECES:
+        # Colored piece tokens
+        for piece in self.COLORED_PIECES:
             vocab[piece] = idx
+            idx += 1
+        
+        # Position marker tokens
+        for marker in self.POSITION_MARKERS:
+            vocab[marker] = idx
             idx += 1
         
         # Square tokens
@@ -418,34 +428,30 @@ class ChessTokenizer(FrequencyChessTokenizer):
     
     def _tokenize(self, text: str) -> List[str]:
         """
-        Tokenize a string of moves into component tokens.
+        Tokenize a string of moves into component tokens with positional markers.
         
-        Each move becomes: [piece, src, dest, *modifiers]
-        Color is implicit from move position (even=White, odd=Black).
+        Each move becomes: [ColoredPiece, [SOURCE], source, [DEST], dest, *modifiers]
         
         Args:
             text: String of space-separated moves (e.g., "WPe2e4 BPe7e5")
         
         Returns:
-            List of component tokens (piece, square, piece, square, ...).
+            List of component tokens with structure markers.
         """
         move_strings = text.strip().split()
         tokens = []
         
-        for move_idx, move_str in enumerate(move_strings):
+        for move_str in move_strings:
             parsed = self._parse_move(move_str)
             
-            # Verify color matches expected position (even=White, odd=Black)
-            expected_color = 'W' if move_idx % 2 == 0 else 'B'
-            if parsed['color'] != expected_color:
-                raise ValueError(
-                    f"Move {move_idx}: Expected color {expected_color}, "
-                    f"got {parsed['color']} in '{move_str}'"
-                )
+            # Build colored piece token (color + piece)
+            colored_piece = f"{parsed['color']}{parsed['piece']}"
+            tokens.append(colored_piece)
             
-            # Add piece, source, destination tokens
-            tokens.append(parsed['piece'])
+            # Add positional markers and squares
+            tokens.append('[SOURCE]')
             tokens.append(parsed['src'])
+            tokens.append('[DEST]')
             tokens.append(parsed['dest'])
             
             # Add modifier tokens if any
@@ -455,10 +461,9 @@ class ChessTokenizer(FrequencyChessTokenizer):
     
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         """
-        Reconstruct moves from component tokens.
+        Reconstruct moves from component tokens with positional markers.
         
-        Groups tokens back into moves: every 3+ tokens = 1 move.
-        Adds color prefix and modifier suffixes.
+        Expects structure: ColoredPiece, [SOURCE], source, [DEST], dest, *modifiers
         
         Args:
             tokens: List of component tokens
@@ -467,7 +472,6 @@ class ChessTokenizer(FrequencyChessTokenizer):
             Space-separated move string.
         """
         moves = []
-        move_count = 0
         token_idx = 0
         
         while token_idx < len(tokens):
@@ -479,26 +483,41 @@ class ChessTokenizer(FrequencyChessTokenizer):
                 token_idx += 1
                 continue
             
-            # Expect: piece, src, dest (3 required tokens)
+            # Expect: ColoredPiece token
+            if token not in self.COLORED_PIECES:
+                break
+            
+            colored_piece = token
+            color = colored_piece[0]  # W or B
+            piece = colored_piece[1]  # P, N, B, R, Q, K
+            
+            # Expect: [SOURCE] marker
+            if token_idx + 1 >= len(tokens) or tokens[token_idx + 1] != '[SOURCE]':
+                break
+            
+            # Expect: source square
             if token_idx + 2 >= len(tokens):
                 break
-            
-            piece = tokens[token_idx]
-            src = tokens[token_idx + 1]
-            dest = tokens[token_idx + 2]
-            
-            # Verify they are valid tokens
-            if piece not in self.PIECES or src not in self.SQUARES or dest not in self.SQUARES:
+            src = tokens[token_idx + 2]
+            if src not in self.SQUARES:
                 break
             
-            # Determine color from move position
-            color = 'W' if move_count % 2 == 0 else 'B'
+            # Expect: [DEST] marker
+            if token_idx + 3 >= len(tokens) or tokens[token_idx + 3] != '[DEST]':
+                break
+            
+            # Expect: dest square
+            if token_idx + 4 >= len(tokens):
+                break
+            dest = tokens[token_idx + 4]
+            if dest not in self.SQUARES:
+                break
             
             # Build move string
             move_str = f"{color}{piece}{src}{dest}"
             
-            # Collect modifiers (next tokens until we hit a piece or end)
-            token_idx += 3
+            # Collect modifiers (next tokens until we hit another colored piece or end)
+            token_idx += 5
             modifiers_list = []
             
             while token_idx < len(tokens) and tokens[token_idx] in self.MODIFIERS:
@@ -523,7 +542,6 @@ class ChessTokenizer(FrequencyChessTokenizer):
                 move_str += f"({modifier_str})"
             
             moves.append(move_str)
-            move_count += 1
         
         return " ".join(moves)
 
