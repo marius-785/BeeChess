@@ -24,7 +24,7 @@ from transformers import (
 
 from src.data import ChessDataCollator, create_train_val_datasets
 from src.model import ChessConfig, ChessForCausalLM
-from src.tokenizer import ChessTokenizer
+from src.tokenizer import ChessTokenizer, FrequencyChessTokenizer
 from src.utils import count_parameters, print_parameter_budget
 
 
@@ -136,6 +136,8 @@ def parse_args():
 def main():
     """Main training function."""
     args = parse_args()
+
+    tokenizerchoice = 2  # 1: Dataset-based tokenizer, 2: Componentwise tokenizer
     
     # Set seed for reproducibility
     set_seed(args.seed)
@@ -144,14 +146,21 @@ def main():
     print("CHESS CHALLENGE - TRAINING")
     print("=" * 60)
     
-    # Build tokenizer from dataset
-    print("\nBuilding tokenizer from dataset...")
-    tokenizer = ChessTokenizer.build_vocab_from_dataset(
-        dataset_name=args.dataset_name,
-        min_frequency=500,  # Only keep moves that appear at least 500 times
-        max_samples=100000,  # Use 100k games to build vocabulary
-    )
-    print(f"   Vocabulary size: {tokenizer.vocab_size}")
+    if tokenizerchoice == 1:    # Build standard tokenizer from dataset
+        print("\nBuilding frequency-based tokenizer from dataset...")
+        tokenizer = FrequencyChessTokenizer.build_vocab_from_dataset(
+            dataset_name=args.dataset_name,
+            min_frequency=500,  # Only keep moves that appear at least 500 times
+            max_samples=100000,  # Use 100k games to build vocabulary
+        )
+        print(f"   Vocabulary size: {tokenizer.vocab_size}")
+
+    elif tokenizerchoice == 2:  # Build componentwise tokenizer
+        print("\nBuilding compositional tokenizer...")
+        tokenizer = ChessTokenizer()
+        print(f"   Vocabulary size: {tokenizer.vocab_size}")
+
+
     
     # Use the vocab size from tokenizer (override args if provided)
     actual_vocab_size = tokenizer.vocab_size

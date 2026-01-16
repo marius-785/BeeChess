@@ -21,16 +21,19 @@ from typing import Dict, List, Optional
 from transformers import PreTrainedTokenizer
 
 
-class ChessTokenizer(PreTrainedTokenizer):
+class FrequencyChessTokenizer(PreTrainedTokenizer):
     """
-    A custom tokenizer for chess moves using extended UCI notation.
+    A frequency-based tokenizer for chess moves using extended UCI notation.
     
     This tokenizer maps each possible chess move to a unique token ID.
     The vocabulary is built from the training dataset to ensure all moves
     encountered during training have a corresponding token.
     
+    Only includes moves that appear at least `min_frequency` times in the dataset.
+    Rare moves become [UNK] tokens.
+    
     Example:
-        >>> tokenizer = ChessTokenizer()
+        >>> tokenizer = FrequencyChessTokenizer()
         >>> tokenizer.encode("WPe2e4 BPe7e5")
         [1, 42, 87, 2]  # [BOS, e2e4, e7e5, EOS]
     """
@@ -110,7 +113,7 @@ class ChessTokenizer(PreTrainedTokenizer):
         cls,
         iterator,
         min_frequency: int = 1,
-    ) -> "ChessTokenizer":
+    ) -> "FrequencyChessTokenizer":
         """
         Build a tokenizer vocabulary from an iterator of game strings.
         
@@ -119,7 +122,7 @@ class ChessTokenizer(PreTrainedTokenizer):
             min_frequency: Minimum frequency for a token to be included.
         
         Returns:
-            A ChessTokenizer with the built vocabulary.
+            A FrequencyChessTokenizer with the built vocabulary.
         """
         from collections import Counter
         
@@ -152,7 +155,7 @@ class ChessTokenizer(PreTrainedTokenizer):
         column: str = "text",
         min_frequency: int = 500,
         max_samples: Optional[int] = 100000,
-    ) -> "ChessTokenizer":
+    ) -> "FrequencyChessTokenizer":
         """
         Build a tokenizer vocabulary from a Hugging Face dataset.
         
@@ -164,7 +167,7 @@ class ChessTokenizer(PreTrainedTokenizer):
             max_samples: Maximum number of samples to process (default: 100k).
         
         Returns:
-            A ChessTokenizer with the built vocabulary.
+            A FrequencyChessTokenizer with the built vocabulary.
         """
         from datasets import load_dataset
         
@@ -276,3 +279,251 @@ def count_vocab_from_dataset(
         token_counts.update(moves)
     
     return dict(token_counts)
+
+
+class ChessTokenizer(FrequencyChessTokenizer):
+    """
+    A compositional tokenizer for chess moves using piece + source + destination encoding.
+    
+    This tokenizer breaks each move into 3 core components:
+    1. Piece: P, N, B, R, Q, K (color determined by position in sequence)
+    2. Source square: a1, a2, ..., h8
+    3. Destination square: a1, a2, ..., h8
+    
+    Optional modifier tokens for captures, checks, checkmate, and castling.
+    
+    Color is determined deterministically:
+    - Even position in move sequence (0, 2, 4, ...) = White
+    - Odd position in move sequence (1, 3, 5, ...) = Black
+    
+    Example:
+        >>> tokenizer = ChessTokenizer()
+        >>> tokenizer.encode("WPe2e4 BPe7e5")
+        [1, P_id, e2_id, e4_id, P_id, e7_id, e5_id, 2]  # [BOS, P, e2, e4, P, e7, e5, EOS]
+    
+    Vocabulary:
+    - Pieces (6): P, N, B, R, Q, K
+    - Squares (64): a1-h8
+    - Modifiers (5): [CAPTURE], [CHECK], [CHECKMATE], [CASTLING_KS], [CASTLING_QS]
+    - Special (4): [PAD], [BOS], [EOS], [UNK]
+    Total: ~80 tokens (deterministic, no frequency filtering)
+    """
+    
+    # Piece tokens (no color prefix - color determined by position)
+    PIECES = ['P', 'N', 'B', 'R', 'Q', 'K']
+    
+    # Board squares (standard chess notation)
+    SQUARES = [f"{file}{rank}" for rank in range(1, 9) for file in "abcdefgh"]
+    
+    # Move modifiers
+    MODIFIERS = ['[CAPTURE]', '[CHECK]', '[CHECKMATE]', '[CASTLING_KS]', '[CASTLING_QS]']
+    
+    def __init__(self, **kwargs):
+        """
+        Initialize the compositional chess tokenizer.
+        
+        Vocabulary is built deterministically from pieces and squares.
+        No vocab_file or dataset scanning needed.
+        """
+        # Remove vocab-related kwargs to avoid conflicts
+        kwargs.pop("vocab_file", None)
+        kwargs.pop("vocab", None)
+        
+        # Build deterministic vocabulary
+        vocab = self._build_deterministic_vocab()
+        
+        # Initialize parent with the built vocab
+        super().__init__(vocab=vocab, **kwargs)
+    
+    def _build_deterministic_vocab(self) -> Dict[str, int]:
+        """
+        Build vocabulary deterministically from pieces, squares, and modifiers.
+        
+        Returns:
+            Dictionary mapping token strings to IDs.
+        """
+        vocab = {}
+        idx = 0
+        
+        # Special tokens first (matching parent class order)
+        special_tokens = [self.PAD_TOKEN, self.BOS_TOKEN, self.EOS_TOKEN, self.UNK_TOKEN]
+        for token in special_tokens:
+            vocab[token] = idx
+            idx += 1
+        
+        # Piece tokens
+        for piece in self.PIECES:
+            vocab[piece] = idx
+            idx += 1
+        
+        # Square tokens
+        for square in self.SQUARES:
+            vocab[square] = idx
+            idx += 1
+        
+        # Modifier tokens
+        for modifier in self.MODIFIERS:
+            vocab[modifier] = idx
+            idx += 1
+        
+        return vocab
+    
+    def _parse_move(self, move_str: str) -> Dict:
+        """
+        Parse a move string in extended UCI notation.
+        
+        Args:
+            move_str: Move string like "WPe2e4" or "BNg8f6(x)" or "We1g1(o)"
+        
+        Returns:
+            Dictionary with keys: piece, color, src, dest, modifiers
+        """
+        import re
+        
+        # Pattern: [WB][PNBRQK]<square><square>(<modifiers>)
+        pattern = r'([WB])([PNBRQK])([a-h][1-8])([a-h][1-8])((?:\([^)]*\))?)'
+        match = re.match(pattern, move_str.strip())
+        
+        if not match:
+            raise ValueError(f"Invalid move format: {move_str}")
+        
+        color, piece, src, dest, modifier_str = match.groups()
+        
+        # Parse modifiers
+        modifiers = []
+        if modifier_str:
+            # Remove parentheses and split by lowercase letters/symbols
+            mod_content = modifier_str.strip('()')
+            
+            if 'x' in mod_content:
+                modifiers.append('[CAPTURE]')
+            if '+*' in mod_content:
+                modifiers.append('[CHECKMATE]')
+            elif '+' in mod_content:
+                modifiers.append('[CHECK]')
+            if 'o' in mod_content or 'O' in mod_content:
+                # Determine kingside vs queenside based on destination
+                if dest == 'g1' or dest == 'g8':
+                    modifiers.append('[CASTLING_KS]')
+                elif dest == 'c1' or dest == 'c8':
+                    modifiers.append('[CASTLING_QS]')
+        
+        return {
+            'piece': piece,
+            'color': color,
+            'src': src,
+            'dest': dest,
+            'modifiers': modifiers,
+        }
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """
+        Tokenize a string of moves into component tokens.
+        
+        Each move becomes: [piece, src, dest, *modifiers]
+        Color is implicit from move position (even=White, odd=Black).
+        
+        Args:
+            text: String of space-separated moves (e.g., "WPe2e4 BPe7e5")
+        
+        Returns:
+            List of component tokens (piece, square, piece, square, ...).
+        """
+        move_strings = text.strip().split()
+        tokens = []
+        
+        for move_idx, move_str in enumerate(move_strings):
+            parsed = self._parse_move(move_str)
+            
+            # Verify color matches expected position (even=White, odd=Black)
+            expected_color = 'W' if move_idx % 2 == 0 else 'B'
+            if parsed['color'] != expected_color:
+                raise ValueError(
+                    f"Move {move_idx}: Expected color {expected_color}, "
+                    f"got {parsed['color']} in '{move_str}'"
+                )
+            
+            # Add piece, source, destination tokens
+            tokens.append(parsed['piece'])
+            tokens.append(parsed['src'])
+            tokens.append(parsed['dest'])
+            
+            # Add modifier tokens if any
+            tokens.extend(parsed['modifiers'])
+        
+        return tokens
+    
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        """
+        Reconstruct moves from component tokens.
+        
+        Groups tokens back into moves: every 3+ tokens = 1 move.
+        Adds color prefix and modifier suffixes.
+        
+        Args:
+            tokens: List of component tokens
+        
+        Returns:
+            Space-separated move string.
+        """
+        moves = []
+        move_count = 0
+        token_idx = 0
+        
+        while token_idx < len(tokens):
+            token = tokens[token_idx]
+            
+            # Skip special tokens
+            special = {self.PAD_TOKEN, self.BOS_TOKEN, self.EOS_TOKEN, self.UNK_TOKEN}
+            if token in special:
+                token_idx += 1
+                continue
+            
+            # Expect: piece, src, dest (3 required tokens)
+            if token_idx + 2 >= len(tokens):
+                break
+            
+            piece = tokens[token_idx]
+            src = tokens[token_idx + 1]
+            dest = tokens[token_idx + 2]
+            
+            # Verify they are valid tokens
+            if piece not in self.PIECES or src not in self.SQUARES or dest not in self.SQUARES:
+                break
+            
+            # Determine color from move position
+            color = 'W' if move_count % 2 == 0 else 'B'
+            
+            # Build move string
+            move_str = f"{color}{piece}{src}{dest}"
+            
+            # Collect modifiers (next tokens until we hit a piece or end)
+            token_idx += 3
+            modifiers_list = []
+            
+            while token_idx < len(tokens) and tokens[token_idx] in self.MODIFIERS:
+                modifier = tokens[token_idx]
+                modifiers_list.append(modifier)
+                token_idx += 1
+            
+            # Append modifier suffixes
+            if modifiers_list:
+                modifier_str = ""
+                if '[CAPTURE]' in modifiers_list:
+                    modifier_str += "x"
+                if '[CHECKMATE]' in modifiers_list:
+                    modifier_str += "+*"
+                elif '[CHECK]' in modifiers_list:
+                    modifier_str += "+"
+                if '[CASTLING_KS]' in modifiers_list:
+                    modifier_str += "o"
+                elif '[CASTLING_QS]' in modifiers_list:
+                    modifier_str += "o"
+                
+                move_str += f"({modifier_str})"
+            
+            moves.append(move_str)
+            move_count += 1
+        
+        return " ".join(moves)
+
