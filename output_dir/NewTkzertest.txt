@@ -1,0 +1,31 @@
+I am running on node: juliet2
+============================================================
+CHESS CHALLENGE - EVALUATION
+============================================================
+
+Loading model from: ./NewTkzer/final_model
+
+Setting up evaluator...
+WARNING: Stockfish not found. Install it for full evaluation.
+
+============================================================
+PHASE 1: LEGAL MOVE EVALUATION
+============================================================
+Testing 500 random positions...
+  Positions: 100/500 | Legal rate: 19.0%
+  Positions: 200/500 | Legal rate: 21.0%
+  Positions: 300/500 | Legal rate: 22.1%
+  Positions: 400/500 | Legal rate: 21.8%
+  Positions: 500/500 | Legal rate: 22.6%
+
+----------------------------------------
+LEGAL MOVE RESULTS
+----------------------------------------
+  Positions tested:     499
+  Legal (1st try):      45 (9.0%)
+  Legal (with retry):   113 (22.6%)
+  Always illegal:       386 (77.4%)
+
+============================================================
+EVALUATION COMPLETE
+============================================================

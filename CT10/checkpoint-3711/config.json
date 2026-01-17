@@ -1,0 +1,20 @@
+{
+  "architectures": [
+    "ChessForCausalLM"
+  ],
+  "bos_token_id": 1,
+  "dropout": 0.1,
+  "dtype": "float32",
+  "eos_token_id": 2,
+  "layer_norm_epsilon": 1e-05,
+  "model_type": "chess_transformer",
+  "n_ctx": 256,
+  "n_embd": 124,
+  "n_head": 4,
+  "n_inner": 372,
+  "n_layer": 6,
+  "pad_token_id": 0,
+  "tie_weights": true,
+  "transformers_version": "4.57.5",
+  "vocab_size": 87
+}
