@@ -545,3 +545,156 @@ class ChessTokenizer(FrequencyChessTokenizer):
         
         return " ".join(moves)
 
+
+class ChessLogitsProcessor:
+    """
+    Logits processor for enforcing chess move structure during generation.
+    
+    Enforces the token sequence pattern:
+    ColoredPiece [SOURCE] source [DEST] dest [modifiers]*
+    
+    Uses a state machine with 6 states:
+    - State 0: Expect colored piece (WP, WN, ..., BK)
+    - State 1: Expect [SOURCE] marker
+    - State 2: Expect source square (a1-h8)
+    - State 3: Expect [DEST] marker
+    - State 4: Expect dest square (a1-h8)
+    - State 5: Expect modifiers or next colored piece
+    
+    Token structure is hardcoded to match ChessTokenizer:
+    - Colored pieces: WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
+    - Position markers: [SOURCE], [DEST]
+    - Squares: a1-h8 (64 total)
+    - Modifiers: [CAPTURE], [CHECK], [CHECKMATE], [CASTLING_KS], [CASTLING_QS]
+    """
+    
+    # Token vocabulary indices (hardcoded to match ChessTokenizer vocab order)
+    # Special tokens: [PAD]=0, [BOS]=1, [EOS]=2, [UNK]=3
+    # Colored pieces (4-15)
+    COLORED_PIECE_IDS = {
+        'WP': 4, 'WN': 5, 'WB': 6, 'WR': 7, 'WQ': 8, 'WK': 9,
+        'BP': 10, 'BN': 11, 'BB': 12, 'BR': 13, 'BQ': 14, 'BK': 15
+    }
+    # Position markers (16-17)
+    POSITION_MARKER_IDS = {'[SOURCE]': 16, '[DEST]': 17}
+    # Squares (18-81): a1=18, a2=19, ..., h8=81
+    SQUARE_IDS = {f"{file}{rank}": 18 + (rank - 1) * 8 + ord(file) - ord('a')
+                  for rank in range(1, 9) for file in "abcdefgh"}
+    # Modifiers (82-86)
+    MODIFIER_IDS = {
+        '[CAPTURE]': 82, '[CHECK]': 83, '[CHECKMATE]': 84,
+        '[CASTLING_KS]': 85, '[CASTLING_QS]': 86
+    }
+    
+    def __init__(self):
+        """
+        Initialize the logits processor with hardcoded ChessTokenizer structure.
+        """
+        import torch
+        self.torch = torch
+        
+        # Convert to sets for membership testing
+        self.colored_piece_ids = set(self.COLORED_PIECE_IDS.values())
+        self.square_ids = set(self.SQUARE_IDS.values())
+        self.modifier_ids = set(self.MODIFIER_IDS.values())
+    
+    def _get_state(self, input_ids):
+        """
+        Determine current state in move sequence based on recent tokens.
+        
+        Returns state (0-5) indicating what token type is expected next.
+        """
+        if input_ids.numel() == 0:
+            return 0  # Start: expect colored piece
+        
+        # Get the last token
+        last_token_id = input_ids[0, -1].item()
+        
+        # Count back to find the last colored piece
+        seq = input_ids[0].tolist()
+        
+        # Find pattern of most recent tokens
+        # Work backwards to identify state
+        for i in range(len(seq) - 1, -1, -1):
+            token_id = seq[i]
+            
+            # If we see a colored piece, analyze what comes after
+            if token_id in self.colored_piece_ids:
+                # Count tokens after this piece
+                tokens_after = len(seq) - 1 - i
+                
+                # Pattern: piece, [SOURCE], source, [DEST], dest, ...
+                if tokens_after == 0:
+                    return 1  # Expect [SOURCE]
+                elif tokens_after == 1:
+                    # Check if last token is [SOURCE]
+                    if seq[-1] == self.POSITION_MARKER_IDS['[SOURCE]']:
+                        return 2  # Expect source square
+                    else:
+                        return 1  # Unexpected, reset to [SOURCE]
+                elif tokens_after == 2:
+                    # Should be: piece, [SOURCE], source
+                    if seq[-2] == self.POSITION_MARKER_IDS['[SOURCE]'] and seq[-1] in self.square_ids:
+                        return 3  # Expect [DEST]
+                    else:
+                        return 1  # Reset
+                elif tokens_after == 3:
+                    # Should be: piece, [SOURCE], source, [DEST]
+                    if seq[-1] == self.POSITION_MARKER_IDS['[DEST]']:
+                        return 4  # Expect dest square
+                    else:
+                        return 1  # Reset
+                elif tokens_after == 4:
+                    # Should be: piece, [SOURCE], source, [DEST], dest
+                    if (seq[-3] == self.POSITION_MARKER_IDS['[DEST]'] and 
+                        seq[-2] in self.square_ids and
+                        seq[-1] in self.square_ids):
+                        return 5  # Expect modifiers or next piece
+                    else:
+                        return 1  # Reset
+                else:
+                    # tokens_after >= 5: in modifier section
+                    # Check if we're building modifiers
+                    return 5
+        
+        # No colored piece found, start fresh
+        return 0
+    
+    def constrain_logits(self, input_ids, logits):
+        """
+        Mask invalid tokens based on current state in move sequence.
+        
+        Args:
+            input_ids: Current token sequence (batch_size, seq_len)
+            logits: Logits from model (batch_size, vocab_size)
+        
+        Returns:
+            logits with invalid tokens masked to -inf
+        """
+        logits = logits.clone()  # Don't modify in place
+        state = self._get_state(input_ids)
+        
+        # Create mask: -inf for invalid tokens, 0 for valid
+        mask = self.torch.full_like(logits, float('-inf'))
+        
+        if state == 0 or state == 5:
+            # State 0 (start) or State 5 (after move): expect colored piece
+            mask[:, list(self.colored_piece_ids)] = 0
+        elif state == 1:
+            # Expect [SOURCE] marker
+            mask[:, self.POSITION_MARKER_IDS['[SOURCE]']] = 0
+        elif state == 2:
+            # Expect source square
+            mask[:, list(self.square_ids)] = 0
+        elif state == 3:
+            # Expect [DEST] marker
+            mask[:, self.POSITION_MARKER_IDS['[DEST]']] = 0
+        elif state == 4:
+            # Expect dest square
+            mask[:, list(self.square_ids)] = 0
+        
+        # Apply mask: keep valid tokens, zero out invalid ones
+        logits[mask == float('-inf')] = float('-inf')
+        
+        return logits
+

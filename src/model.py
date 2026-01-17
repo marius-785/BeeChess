@@ -389,6 +389,9 @@ class ChessForCausalLM(PreTrainedModel):
         """
         Generate the next move given a sequence of moves.
         
+        Applies structural constraints enforcing:
+        ColoredPiece [SOURCE] source [DEST] dest [modifiers]*
+        
         Args:
             input_ids: Token IDs of shape (1, seq_len).
             temperature: Sampling temperature (1.0 = no change).
@@ -402,11 +405,16 @@ class ChessForCausalLM(PreTrainedModel):
         
         # Get logits for the last position
         outputs = self(input_ids)
-        logits = outputs.logits[:, -1, :] / temperature
+        logits = outputs.logits[:, -1, :].clone() / temperature
+        
+        # Apply structural constraints (hardcoded to ChessTokenizer structure)
+        from src.tokenizer import ChessLogitsProcessor
+        processor = ChessLogitsProcessor()
+        logits = processor.constrain_logits(input_ids, logits)
         
         # Apply top-k filtering
         if top_k is not None:
-            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+            indices_to_remove = logits < torch.topk(logits, min(top_k, logits.size(-1)))[0][..., -1, None]
             logits[indices_to_remove] = float("-inf")
         
         # Apply top-p (nucleus) filtering
