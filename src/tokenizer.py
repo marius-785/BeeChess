@@ -344,6 +344,18 @@ class ChessTokenizer(FrequencyChessTokenizer):
         # Initialize parent with the built vocab
         super().__init__(vocab=vocab, **kwargs)
     
+    @property
+    def vocab_size(self) -> int:
+        """
+        Return the vocabulary size.
+        
+        Tokens: [PAD]=0, [BOS]=1, [EOS]=2, [UNK]=3, W=4, B=5, P-K=6-11, 
+                 [SOURCE]=12, [DEST]=13, squares=14-77, modifiers=78-82
+        
+        Total: 83 tokens (indices 0-82)
+        """
+        return 4 + 2 + 6 + 2 + 64 + 5  # special + colors + pieces + markers + squares + modifiers
+    
     def _build_deterministic_vocab(self) -> Dict[str, int]:
         """
         Build vocabulary deterministically from colored pieces, squares, and modifiers.
