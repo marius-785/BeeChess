@@ -283,36 +283,40 @@ def count_vocab_from_dataset(
 
 class ChessTokenizer(FrequencyChessTokenizer):
     """
-    A compositional tokenizer for chess moves using colored pieces + positional markers.
+    A compositional tokenizer for chess moves using split color/piece tokens.
     
-    This tokenizer breaks each move into 5 core components with explicit structure:
-    1. ColoredPiece: WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
-    2. SOURCE marker: [SOURCE]
-    3. Source square: a1, a2, ..., h8
-    4. DEST marker: [DEST]
-    5. Destination square: a1, a2, ..., h8
+    This tokenizer breaks each move into 6 core components with explicit structure:
+    1. Color: W or B (makes turn information explicit!)
+    2. Piece: P, N, B, R, Q, K
+    3. SOURCE marker: [SOURCE]
+    4. Source square: a1, a2, ..., h8
+    5. DEST marker: [DEST]
+    6. Destination square: a1, a2, ..., h8
     
     Optional modifier tokens for captures, checks, checkmate, and castling.
     
     Example:
         >>> tokenizer = ChessTokenizer()
         >>> tokenizer.encode("WPe2e4 BPe7e5")
-        [1, WP_id, SRC_id, e2_id, DST_id, e4_id, BP_id, SRC_id, e7_id, DST_id, e5_id, 2]
+        [1, W_id, P_id, SRC_id, e2_id, DST_id, e4_id, B_id, P_id, SRC_id, e7_id, DST_id, e5_id, 2]
     
     Vocabulary:
-    - Colored pieces (12): WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
+    - Colors (2): W, B [makes turn alternation explicit]
+    - Pieces (6): P, N, B, R, Q, K
     - Position markers (2): [SOURCE], [DEST]
     - Squares (64): a1-h8
     - Modifiers (5): [CAPTURE], [CHECK], [CHECKMATE], [CASTLING_KS], [CASTLING_QS]
     - Special (4): [PAD], [BOS], [EOS], [UNK]
-    Total: ~87 tokens (deterministic, no frequency filtering)
+    Total: ~83 tokens (deterministic, 4 fewer than before)
+    
+    Key advantage: Color is now EXPLICIT, making turn alternation obvious to the model!
     """
     
-    # Colored piece tokens (color + piece)
-    COLORED_PIECES = [
-        'WP', 'WN', 'WB', 'WR', 'WQ', 'WK',  # White pieces
-        'BP', 'BN', 'BB', 'BR', 'BQ', 'BK',  # Black pieces
-    ]
+    # Color tokens (split for explicit turn information)
+    COLORS = ['W', 'B']
+    
+    # Piece tokens
+    PIECES = ['P', 'N', 'B', 'R', 'Q', 'K']
     
     # Position markers
     POSITION_MARKERS = ['[SOURCE]', '[DEST]']
@@ -356,8 +360,13 @@ class ChessTokenizer(FrequencyChessTokenizer):
             vocab[token] = idx
             idx += 1
         
-        # Colored piece tokens
-        for piece in self.COLORED_PIECES:
+        # Color tokens (W, B)
+        for color in self.COLORS:
+            vocab[color] = idx
+            idx += 1
+        
+        # Piece tokens (P, N, B, R, Q, K)
+        for piece in self.PIECES:
             vocab[piece] = idx
             idx += 1
         
@@ -444,9 +453,9 @@ class ChessTokenizer(FrequencyChessTokenizer):
         for move_str in move_strings:
             parsed = self._parse_move(move_str)
             
-            # Build colored piece token (color + piece)
-            colored_piece = f"{parsed['color']}{parsed['piece']}"
-            tokens.append(colored_piece)
+            # Add color and piece as SEPARATE tokens (now explicit!)
+            tokens.append(parsed['color'])  # W or B
+            tokens.append(parsed['piece'])  # P, N, B, R, Q, K
             
             # Add positional markers and squares
             tokens.append('[SOURCE]')
@@ -463,7 +472,7 @@ class ChessTokenizer(FrequencyChessTokenizer):
         """
         Reconstruct moves from component tokens with positional markers.
         
-        Expects structure: ColoredPiece, [SOURCE], source, [DEST], dest, *modifiers
+        Expects structure: Color, Piece, [SOURCE], source, [DEST], dest, *modifiers
         
         Args:
             tokens: List of component tokens
@@ -483,41 +492,46 @@ class ChessTokenizer(FrequencyChessTokenizer):
                 token_idx += 1
                 continue
             
-            # Expect: ColoredPiece token
-            if token not in self.COLORED_PIECES:
+            # Expect: Color token (W or B)
+            if token not in self.COLORS:
                 break
             
-            colored_piece = token
-            color = colored_piece[0]  # W or B
-            piece = colored_piece[1]  # P, N, B, R, Q, K
+            color = token
+            
+            # Expect: Piece token (P, N, B, R, Q, K)
+            if token_idx + 1 >= len(tokens) or tokens[token_idx + 1] not in self.PIECES:
+                break
+            
+            piece = tokens[token_idx + 1]
+            colored_piece = color + piece
             
             # Expect: [SOURCE] marker
-            if token_idx + 1 >= len(tokens) or tokens[token_idx + 1] != '[SOURCE]':
+            if token_idx + 2 >= len(tokens) or tokens[token_idx + 2] != '[SOURCE]':
                 break
             
             # Expect: source square
-            if token_idx + 2 >= len(tokens):
+            if token_idx + 3 >= len(tokens):
                 break
-            src = tokens[token_idx + 2]
+            src = tokens[token_idx + 3]
             if src not in self.SQUARES:
                 break
             
             # Expect: [DEST] marker
-            if token_idx + 3 >= len(tokens) or tokens[token_idx + 3] != '[DEST]':
+            if token_idx + 4 >= len(tokens) or tokens[token_idx + 4] != '[DEST]':
                 break
             
             # Expect: dest square
-            if token_idx + 4 >= len(tokens):
+            if token_idx + 5 >= len(tokens):
                 break
-            dest = tokens[token_idx + 4]
+            dest = tokens[token_idx + 5]
             if dest not in self.SQUARES:
                 break
             
             # Build move string
             move_str = f"{color}{piece}{src}{dest}"
             
-            # Collect modifiers (next tokens until we hit another colored piece or end)
-            token_idx += 5
+            # Collect modifiers (next tokens until we hit another color token or end)
+            token_idx += 6
             modifiers_list = []
             
             while token_idx < len(tokens) and tokens[token_idx] in self.MODIFIERS:
@@ -551,18 +565,20 @@ class ChessLogitsProcessor:
     Logits processor for enforcing chess move structure during generation.
     
     Enforces the token sequence pattern:
-    ColoredPiece [SOURCE] source [DEST] dest [modifiers]*
+    Color Piece [SOURCE] source [DEST] dest [modifiers]*
     
-    Uses a state machine with 6 states:
-    - State 0: Expect colored piece (WP, WN, ..., BK)
-    - State 1: Expect [SOURCE] marker
-    - State 2: Expect source square (a1-h8)
-    - State 3: Expect [DEST] marker
-    - State 4: Expect dest square (a1-h8)
-    - State 5: Expect modifiers or next colored piece
+    Uses a state machine with 7 states:
+    - State 0: Expect color (W, B)
+    - State 1: Expect piece (P, N, B, R, Q, K)
+    - State 2: Expect [SOURCE] marker
+    - State 3: Expect source square (a1-h8)
+    - State 4: Expect [DEST] marker
+    - State 5: Expect dest square (a1-h8)
+    - State 6: Expect modifiers or next color token
     
     Token structure is hardcoded to match ChessTokenizer:
-    - Colored pieces: WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK
+    - Colors: W, B (EXPLICIT for turn alternation)
+    - Pieces: P, N, B, R, Q, K
     - Position markers: [SOURCE], [DEST]
     - Squares: a1-h8 (64 total)
     - Modifiers: [CAPTURE], [CHECK], [CHECKMATE], [CASTLING_KS], [CASTLING_QS]
@@ -570,20 +586,19 @@ class ChessLogitsProcessor:
     
     # Token vocabulary indices (hardcoded to match ChessTokenizer vocab order)
     # Special tokens: [PAD]=0, [BOS]=1, [EOS]=2, [UNK]=3
-    # Colored pieces (4-15)
-    COLORED_PIECE_IDS = {
-        'WP': 4, 'WN': 5, 'WB': 6, 'WR': 7, 'WQ': 8, 'WK': 9,
-        'BP': 10, 'BN': 11, 'BB': 12, 'BR': 13, 'BQ': 14, 'BK': 15
-    }
-    # Position markers (16-17)
-    POSITION_MARKER_IDS = {'[SOURCE]': 16, '[DEST]': 17}
-    # Squares (18-81): a1=18, a2=19, ..., h8=81
-    SQUARE_IDS = {f"{file}{rank}": 18 + (rank - 1) * 8 + ord(file) - ord('a')
+    # Colors (4-5)
+    COLOR_IDS = {'W': 4, 'B': 5}
+    # Pieces (6-11)
+    PIECE_IDS = {'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11}
+    # Position markers (12-13)
+    POSITION_MARKER_IDS = {'[SOURCE]': 12, '[DEST]': 13}
+    # Squares (14-77): a1=14, a2=15, ..., h8=77
+    SQUARE_IDS = {f"{file}{rank}": 14 + (rank - 1) * 8 + ord(file) - ord('a')
                   for rank in range(1, 9) for file in "abcdefgh"}
-    # Modifiers (82-86)
+    # Modifiers (78-82)
     MODIFIER_IDS = {
-        '[CAPTURE]': 82, '[CHECK]': 83, '[CHECKMATE]': 84,
-        '[CASTLING_KS]': 85, '[CASTLING_QS]': 86
+        '[CAPTURE]': 78, '[CHECK]': 79, '[CHECKMATE]': 80,
+        '[CASTLING_KS]': 81, '[CASTLING_QS]': 82
     }
     
     def __init__(self):
@@ -594,7 +609,8 @@ class ChessLogitsProcessor:
         self.torch = torch
         
         # Convert to sets for membership testing
-        self.colored_piece_ids = set(self.COLORED_PIECE_IDS.values())
+        self.color_ids = set(self.COLOR_IDS.values())
+        self.piece_ids = set(self.PIECE_IDS.values())
         self.square_ids = set(self.SQUARE_IDS.values())
         self.modifier_ids = set(self.MODIFIER_IDS.values())
     
@@ -602,99 +618,133 @@ class ChessLogitsProcessor:
         """
         Determine current state in move sequence based on recent tokens.
         
-        Returns state (0-5) indicating what token type is expected next.
+        Returns state (0-6) indicating what token type is expected next.
         """
         if input_ids.numel() == 0:
-            return 0  # Start: expect colored piece
+            return 0  # Start: expect color
         
-        # Get the last token
-        last_token_id = input_ids[0, -1].item()
-        
-        # Count back to find the last colored piece
+        # Get the sequence of tokens
         seq = input_ids[0].tolist()
         
-        # Find pattern of most recent tokens
-        # Work backwards to identify state
+        # Work backwards to find the last color token (marks start of move)
+        last_move_idx = -1
         for i in range(len(seq) - 1, -1, -1):
-            token_id = seq[i]
-            
-            # If we see a colored piece, analyze what comes after
-            if token_id in self.colored_piece_ids:
-                # Count tokens after this piece
-                tokens_after = len(seq) - 1 - i
-                
-                # Pattern: piece, [SOURCE], source, [DEST], dest, ...
-                if tokens_after == 0:
-                    return 1  # Expect [SOURCE]
-                elif tokens_after == 1:
-                    # Check if last token is [SOURCE]
-                    if seq[-1] == self.POSITION_MARKER_IDS['[SOURCE]']:
-                        return 2  # Expect source square
-                    else:
-                        return 1  # Unexpected, reset to [SOURCE]
-                elif tokens_after == 2:
-                    # Should be: piece, [SOURCE], source
-                    if seq[-2] == self.POSITION_MARKER_IDS['[SOURCE]'] and seq[-1] in self.square_ids:
-                        return 3  # Expect [DEST]
-                    else:
-                        return 1  # Reset
-                elif tokens_after == 3:
-                    # Should be: piece, [SOURCE], source, [DEST]
-                    if seq[-1] == self.POSITION_MARKER_IDS['[DEST]']:
-                        return 4  # Expect dest square
-                    else:
-                        return 1  # Reset
-                elif tokens_after == 4:
-                    # Should be: piece, [SOURCE], source, [DEST], dest
-                    if (seq[-3] == self.POSITION_MARKER_IDS['[DEST]'] and 
-                        seq[-2] in self.square_ids and
-                        seq[-1] in self.square_ids):
-                        return 5  # Expect modifiers or next piece
-                    else:
-                        return 1  # Reset
-                else:
-                    # tokens_after >= 5: in modifier section
-                    # Check if we're building modifiers
-                    return 5
+            if seq[i] in self.color_ids:
+                last_move_idx = i
+                break
         
-        # No colored piece found, start fresh
-        return 0
+        if last_move_idx == -1:
+            return 0  # No color found, expect color
+        
+        # Count tokens since last color
+        tokens_since_color = len(seq) - 1 - last_move_idx
+        
+        # Pattern: Color, Piece, [SOURCE], source, [DEST], dest, ...modifiers
+        if tokens_since_color == 0:
+            return 1  # Expect piece after color
+        elif tokens_since_color == 1:
+            # Should have: color, piece
+            if seq[-1] in self.piece_ids:
+                return 2  # Expect [SOURCE]
+            else:
+                return 1  # Unexpected, reset
+        elif tokens_since_color == 2:
+            # Should have: color, piece, [SOURCE]
+            if (seq[-2] in self.piece_ids and 
+                seq[-1] in [self.POSITION_MARKER_IDS['[SOURCE]']]):
+                return 3  # Expect source square
+            else:
+                return 1  # Reset
+        elif tokens_since_color == 3:
+            # Should have: color, piece, [SOURCE], source
+            if (seq[-3] in self.piece_ids and
+                seq[-2] in [self.POSITION_MARKER_IDS['[SOURCE]']] and
+                seq[-1] in self.square_ids):
+                return 4  # Expect [DEST]
+            else:
+                return 1  # Reset
+        elif tokens_since_color == 4:
+            # Should have: color, piece, [SOURCE], source, [DEST]
+            if (seq[-2] in self.square_ids and
+                seq[-1] in [self.POSITION_MARKER_IDS['[DEST]']]):
+                return 5  # Expect dest square
+            else:
+                return 1  # Reset
+        elif tokens_since_color == 5:
+            # Should have: color, piece, [SOURCE], source, [DEST], dest
+            if seq[-1] in self.square_ids:
+                return 6  # Expect modifiers or next color (move complete)
+            else:
+                return 1  # Reset
+        else:
+            # tokens_since_color >= 6: We're in modifiers or expecting next move
+            # If last token is a modifier, still expect more modifiers or next color
+            # If last token is not a modifier, we should expect next color
+            if seq[-1] not in self.modifier_ids:
+                return 0  # Expect next move (next color)
+            else:
+                return 6  # Could be more modifiers or next color
     
     def constrain_logits(self, input_ids, logits):
         """
-        Mask invalid tokens based on current state in move sequence.
+        Mask invalid tokens in logits based on move structure.
+        
+        Sets logits to -inf for tokens that violate move structure.
         
         Args:
-            input_ids: Current token sequence (batch_size, seq_len)
-            logits: Logits from model (batch_size, vocab_size)
+            input_ids: Model input token IDs of shape (batch_size, seq_len)
+            logits: Model output logits of shape (batch_size, vocab_size)
         
         Returns:
-            logits with invalid tokens masked to -inf
+            Modified logits with invalid tokens masked to -inf
         """
-        logits = logits.clone()  # Don't modify in place
         state = self._get_state(input_ids)
         
-        # Create mask: -inf for invalid tokens, 0 for valid
-        mask = self.torch.full_like(logits, float('-inf'))
+        # Create a mask for valid tokens (all ones initially)
+        valid_mask = self.torch.ones(logits.shape[-1], dtype=self.torch.bool)
+        valid_mask[:] = False  # Start by forbidding all
         
-        if state == 0 or state == 5:
-            # State 0 (start) or State 5 (after move): expect colored piece
-            mask[:, list(self.colored_piece_ids)] = 0
+        # Allow tokens based on current state
+        if state == 0:
+            # Expect color (W or B)
+            for color_id in self.color_ids:
+                valid_mask[color_id] = True
+        
         elif state == 1:
-            # Expect [SOURCE] marker
-            mask[:, self.POSITION_MARKER_IDS['[SOURCE]']] = 0
-        elif state == 2:
-            # Expect source square
-            mask[:, list(self.square_ids)] = 0
-        elif state == 3:
-            # Expect [DEST] marker
-            mask[:, self.POSITION_MARKER_IDS['[DEST]']] = 0
-        elif state == 4:
-            # Expect dest square
-            mask[:, list(self.square_ids)] = 0
+            # Expect piece (P, N, B, R, Q, K)
+            for piece_id in self.piece_ids:
+                valid_mask[piece_id] = True
         
-        # Apply mask: keep valid tokens, zero out invalid ones
-        logits[mask == float('-inf')] = float('-inf')
+        elif state == 2:
+            # Expect [SOURCE]
+            valid_mask[self.POSITION_MARKER_IDS['[SOURCE]']] = True
+        
+        elif state == 3:
+            # Expect source square
+            for square_id in self.square_ids:
+                valid_mask[square_id] = True
+        
+        elif state == 4:
+            # Expect [DEST]
+            valid_mask[self.POSITION_MARKER_IDS['[DEST]']] = True
+        
+        elif state == 5:
+            # Expect dest square
+            for square_id in self.square_ids:
+                valid_mask[square_id] = True
+        
+        elif state == 6:
+            # Expect modifiers or next color token
+            # Allow: modifiers + colors + EOS
+            for modifier_id in self.modifier_ids:
+                valid_mask[modifier_id] = True
+            for color_id in self.color_ids:
+                valid_mask[color_id] = True
+            valid_mask[2] = True  # Allow EOS to end sequence
+        
+        # Apply mask
+        logits = logits.clone()
+        logits[0, ~valid_mask] = float('-inf')
         
         return logits
 
