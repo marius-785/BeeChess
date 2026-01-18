@@ -570,6 +570,150 @@ class ChessTokenizer(FrequencyChessTokenizer):
             moves.append(move_str)
         
         return " ".join(moves)
+    
+    def decode(self, token_ids, skip_special_tokens=False, **kwargs):
+        """
+        Decode token IDs back to string representation.
+        
+        Properly handles individual tokens by converting each ID to its token string.
+        For single tokens or incomplete move sequences, returns the raw token strings.
+        For complete move sequences, reconstructs the move format.
+        
+        Args:
+            token_ids: List or tensor of token IDs
+            skip_special_tokens: Whether to skip special tokens in output
+            **kwargs: Additional arguments (for compatibility)
+        
+        Returns:
+            String representation of the tokens
+        """
+        # Convert tensor to list if needed
+        if hasattr(token_ids, 'tolist'):
+            token_ids = token_ids.tolist()
+        
+        # Handle 2D tensor/list (batch)
+        if isinstance(token_ids, list) and len(token_ids) > 0 and isinstance(token_ids[0], list):
+            return [self.decode(ids, skip_special_tokens=skip_special_tokens) for ids in token_ids]
+        
+        # Convert IDs to tokens
+        tokens = []
+        for token_id in token_ids:
+            if isinstance(token_id, int):
+                token = self._convert_id_to_token(token_id)
+            else:
+                token = str(token_id)
+            
+            tokens.append(token)
+        
+        # Try to reconstruct moves from tokens
+        # If successful, return the reconstructed moves
+        reconstructed = self._try_reconstruct_moves(tokens, skip_special_tokens)
+        if reconstructed is not None:
+            return reconstructed
+        
+        # Fallback: return tokens joined with spaces, filtering special tokens if requested
+        if skip_special_tokens:
+            special = {self.PAD_TOKEN, self.BOS_TOKEN, self.EOS_TOKEN, self.UNK_TOKEN}
+            tokens = [t for t in tokens if t not in special]
+        
+        return " ".join(tokens)
+    
+    def _try_reconstruct_moves(self, tokens: List[str], skip_special_tokens: bool = False) -> Optional[str]:
+        """
+        Try to reconstruct complete moves from tokens.
+        
+        Returns the reconstructed move string if tokens form valid move(s),
+        None if tokens don't form a complete move structure.
+        
+        Args:
+            tokens: List of token strings
+            skip_special_tokens: Whether to skip special tokens
+        
+        Returns:
+            Reconstructed move string or None
+        """
+        moves = []
+        token_idx = 0
+        found_moves = False
+        
+        while token_idx < len(tokens):
+            token = tokens[token_idx]
+            
+            # Skip special tokens
+            special = {self.PAD_TOKEN, self.BOS_TOKEN, self.EOS_TOKEN, self.UNK_TOKEN}
+            if token in special:
+                token_idx += 1
+                continue
+            
+            # Check if this starts a move (color token)
+            if token not in self.COLORS:
+                # No more complete moves
+                break
+            
+            color = token
+            
+            # Need at least 6 more tokens for a complete move
+            if token_idx + 5 >= len(tokens):
+                break
+            
+            # Expect: Piece token (P, N, B, R, Q, K)
+            if tokens[token_idx + 1] not in self.PIECES:
+                break
+            
+            piece = tokens[token_idx + 1]
+            
+            # Expect: [SOURCE] marker
+            if tokens[token_idx + 2] != '[SOURCE]':
+                break
+            
+            # Expect: source square
+            src = tokens[token_idx + 3]
+            if src not in self.SQUARES:
+                break
+            
+            # Expect: [DEST] marker
+            if tokens[token_idx + 4] != '[DEST]':
+                break
+            
+            # Expect: dest square
+            dest = tokens[token_idx + 5]
+            if dest not in self.SQUARES:
+                break
+            
+            # Build move string
+            move_str = f"{color}{piece}{src}{dest}"
+            
+            # Collect modifiers
+            token_idx += 6
+            modifiers_list = []
+            
+            while token_idx < len(tokens) and tokens[token_idx] in self.MODIFIERS:
+                modifiers_list.append(tokens[token_idx])
+                token_idx += 1
+            
+            # Append modifier suffixes
+            if modifiers_list:
+                modifier_str = ""
+                if '[CAPTURE]' in modifiers_list:
+                    modifier_str += "x"
+                if '[CHECKMATE]' in modifiers_list:
+                    modifier_str += "+*"
+                elif '[CHECK]' in modifiers_list:
+                    modifier_str += "+"
+                if '[CASTLING_KS]' in modifiers_list:
+                    modifier_str += "o"
+                elif '[CASTLING_QS]' in modifiers_list:
+                    modifier_str += "o"
+                
+                move_str += f"({modifier_str})"
+            
+            moves.append(move_str)
+            found_moves = True
+        
+        if found_moves:
+            return " ".join(moves)
+        
+        return None
 
 
 class ChessLogitsProcessor:
